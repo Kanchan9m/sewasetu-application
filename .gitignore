@@ -3,3 +3,9 @@ logs/sewasetu-logs-jan-jun-2026/nginx-access_unzipped.log
 logs/sewasetu-logs-jan-jun-2026_unzipped.tar
 logs/sewasetu-logs-jan-jun-2026.tar.gz
 *.log
+
+logs/
+*.log
+*.log_gz
+*.tar
+*.tar.gz
