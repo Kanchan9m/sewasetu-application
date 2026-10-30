@@ -66,6 +66,7 @@ def get_db():
         password=config.get("database", "password"),
     )
 
+
 @app.teardown_appcontext
 def return_db(error=None):
     """Return the borrowed connection to the pool."""
@@ -99,8 +100,9 @@ def sanitize(value, maxlen=20):
     if value is None:
         return ""
     value = value.strip()
-    encoded = value.encode("utf-8")[:maxlen]
-    return encoded.decode("utf-8", errors="ignore")
+    return value[:maxlen]
+    # encoded = value.encode("utf-8")[:maxlen]
+    # return encoded.decode("utf-8", errors="ignore")
 
 
 def hash_password(p):
@@ -172,11 +174,11 @@ def apply():
             return render_template("apply.html", captcha_q=make_captcha())
         code = str(random.randint(100000, 999999))
         conn = get_db()
-        cur = conn.cursor()
+        cur = conn.cursor() 
         cur.execute("INSERT INTO otps (mobile, code, created_at) VALUES (%s, %s, %s)",
                     (mobile, code, datetime.now()))
         conn.commit()
-        cur.close(); 
+        cur.close(); conn.close()
         send_sms(mobile, "Your Sewa Setu OTP is %s. Valid for 5 minutes." % code)
         session.permanent = True
         session["apply_mobile"] = mobile
@@ -198,11 +200,11 @@ def verify():
     if request.method == "POST":
         code = request.form.get("otp", "").strip()
         conn = get_db()
-        cur = conn.cursor()
+        cur = conn.cursor() 
         cur.execute("SELECT code, created_at FROM otps WHERE mobile = %s "
                     "ORDER BY id DESC LIMIT 1", (mobile,))
         row = cur.fetchone()
-        cur.close(); 
+        cur.close(); conn.close() 
         if row and row[0] == code:
             age = (datetime.now() - row[1]).total_seconds()
             if age > OTP_VALIDITY_SECONDS:
@@ -320,11 +322,11 @@ def handle_submission():
         return redirect(url_for("index"))
 
     conn = get_db()
-    cur = conn.cursor()
+    cur = conn.cursor() 
 
     cur.execute("SELECT count(*) FROM applications WHERE mobile = %s", (mobile,))
     if cur.fetchone()[0] > 0:
-        cur.close(); 
+        cur.close(); conn.close()
         flash("An application already exists for this mobile number. "
               "Duplicate applications are not permitted.")
         return redirect(url_for("index"))
@@ -357,7 +359,7 @@ def handle_submission():
     with open(os.path.join(ack_dir, "%d.pdf" % new_id), "wb") as out:
         out.write(pdf_bytes)
 
-    cur.close(); 
+    cur.close(); conn.close()
     session.pop("form_data", None)
     session.pop("doc_path", None)
     session.pop("verified_mobile", None)
@@ -371,11 +373,19 @@ def generate_acknowledgment(cur, app_id):
                 "bank_account, ifsc, submitted_at, status FROM applications WHERE id = %s",
                 (app_id,))
     row = cur.fetchone()
+    font_path = os.path.join(
+        BASE_DIR, "fonts", "NotoSansBengali-Regular.ttf"
+    )
+    if not os.path.isfile(font_path):
+        raise FileNotFoundError("Unicode font not found: " + font_path)
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 14)
+    # pdf.set_font("Helvetica", "B", 14)
+    pdf.add_font("NotoSansBengali", fname=font_path)
+    pdf.set_font("NotoSansBengali", size=14)
     pdf.cell(0, 10, "GOVERNMENT OF PURVANCHAL", ln=1, align="C")
-    pdf.set_font("Helvetica", "", 11)
+    # pdf.set_font("Helvetica", "", 11)
+    pdf.set_font("NotoSansBengali", size=11)
     pdf.cell(0, 8, "Department of Social Welfare", ln=1, align="C")
     pdf.cell(0, 8, "Old Age Pension Scheme - Acknowledgment", ln=1, align="C")
     pdf.ln(4)
@@ -386,15 +396,19 @@ def generate_acknowledgment(cur, app_id):
         pdf.line(x, 12, x + 0.5, 12)
     labels = ["Application No", "Applicant Name", "Mobile", "Date of Birth",
               "Village", "Block", "Bank Account", "IFSC", "Submitted At", "Status"]
-    pdf.set_font("Helvetica", "", 10)
+    # pdf.set_font("Helvetica", "", 10)
+    pdf.set_font("NotoSansBengali", size=10)
     for label, val in zip(labels, row):
         try:
             pdf.cell(60, 8, label, border=1)
             pdf.cell(0, 8, str(val), border=1, ln=1)
         except Exception:
-            pdf.cell(0, 8, "?", border=1, ln=1)
+            # pdf.cell(0, 8, "?", border=1, ln=1)
+            app.logger.exception("Failed to render PDF field: %s", label)
+            raise
     pdf.ln(6)
-    pdf.set_font("Helvetica", "I", 9)
+    # pdf.set_font("Helvetica", "I", 9)
+    pdf.set_font("NotoSansBengali", size=9)
     pdf.multi_cell(0, 5, "This is a computer generated acknowledgment. Processing SLA "
                          "as per the Purvanchal Right to Public Services Act applies.")
     return bytes(pdf.output())
@@ -410,19 +424,19 @@ def status_login():
         mobile = request.form.get("mobile", "").strip()
         password = request.form.get("password", "")
         conn = get_db()
-        cur = conn.cursor()
+        cur = conn.cursor() 
         cur.execute("SELECT password_hash FROM portal_users WHERE mobile = %s", (mobile,))
         row = cur.fetchone()
-        cur.close(); 
+        cur.close(); conn.close() 
         if row and row[0] == hash_password(password):
             session["logged_in"] = True
             session["portal_mobile"] = mobile
             conn = get_db()
-            cur = conn.cursor()
+            cur = conn.cursor() 
             cur.execute("SELECT id FROM applications WHERE mobile = %s "
                         "ORDER BY submitted_at DESC LIMIT 1", (mobile,))
             r = cur.fetchone()
-            cur.close(); 
+            cur.close(); conn.close()
             if r:
                 return redirect(url_for("view_application", app_id=r[0]))
             flash("No application found for this mobile number.")
@@ -437,12 +451,12 @@ def view_application(app_id):
         flash("Please login to view application status.")
         return redirect(url_for("status_login"))
     conn = get_db()
-    cur = conn.cursor()
+    cur = conn.cursor() 
     cur.execute("SELECT application_no, applicant_name, mobile, dob, village, block, "
                 "bank_account, ifsc, status, submitted_at, decided_at "
                 "FROM applications WHERE id = %s", (app_id,))
     row = cur.fetchone()
-    cur.close(); 
+    cur.close(); conn.close() 
     if not row:
         abort(404)
     return render_template("application.html", a=row, app_id=app_id)
@@ -453,13 +467,13 @@ def ack_pdf(app_id):
     path = os.path.join(UPLOAD_DIR, "ack", "%d.pdf" % app_id)
     if not os.path.exists(path):
         conn = get_db()
-        cur = conn.cursor()
+        cur = conn.cursor() 
         cur.execute("SELECT id FROM applications WHERE id = %s", (app_id,))
         if not cur.fetchone():
-            cur.close(); 
+            cur.close(); conn.close() 
             abort(404)
         data = generate_acknowledgment(cur, app_id)
-        cur.close(); 
+        cur.close(); conn.close() 
         return send_file(io.BytesIO(data), mimetype="application/pdf")
     return send_file(path, mimetype="application/pdf")
 
@@ -483,7 +497,7 @@ def reset_password():
                 conn.commit()
                 send_sms(row[0], "Sewa Setu: your password has been reset to your "
                                  "date of birth (DDMMYYYY).")
-        cur.close(); 
+        cur.close(); conn.close()
         flash("If the mobile number exists, the password has been reset and sent by SMS.")
     return render_template("reset.html")
 
@@ -518,7 +532,7 @@ def admin_dashboard():
     cur.execute("SELECT block, count(*) FROM applications WHERE status = 'PENDING' "
                 "GROUP BY block ORDER BY count(*) DESC")
     by_block = cur.fetchall()
-    cur.close(); 
+    cur.close(); conn.close()
     return render_template("admin_dashboard.html", by_status=by_status,
                            overdue=overdue, by_block=by_block, sla=SLA_DAYS)
 
@@ -536,7 +550,7 @@ def admin_list():
                 "ORDER BY submitted_at ASC LIMIT 50 OFFSET %s",
                 (status, (page - 1) * 50))
     rows = cur.fetchall()
-    cur.close(); 
+    cur.close(); conn.close() 
     return render_template("admin_list.html", rows=rows, status=status, page=page)
 
 
@@ -551,7 +565,7 @@ def admin_view(app_id):
                 "status, submitted_at, decided_at, decided_by "
                 "FROM applications WHERE id = %s", (app_id,))
     row = cur.fetchone()
-    cur.close(); 
+    cur.close(); conn.close()
     if not row:
         abort(404)
     return render_template("admin_view.html", a=row, app_id=app_id)
@@ -566,7 +580,7 @@ def admin_approve(app_id):
     cur.execute("UPDATE applications SET status = 'APPROVED', decided_at = %s "
                 "WHERE id = %s", (datetime.now(), app_id))
     conn.commit()
-    cur.close(); 
+    cur.close(); conn.close()
     flash("Application approved.")
     return redirect(url_for("admin_list"))
 
@@ -580,7 +594,7 @@ def admin_reject(app_id):
     cur.execute("UPDATE applications SET status = 'REJECTED', decided_at = %s "
                 "WHERE id = %s", (datetime.now(), app_id))
     conn.commit()
-    cur.close(); 
+    cur.close(); conn.close()
     flash("Application rejected.")
     return redirect(url_for("admin_list"))
 
