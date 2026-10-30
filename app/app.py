@@ -55,21 +55,46 @@ try:
 except Exception:
     pass
 
+db_pool = None
+db_pool_pid = None
 
+def get_db_pool():
+    global db_pool, db_pool_pid
+
+    current_pid = os.getpid()
+
+    if db_pool is None or db_pool_pid != current_pid:
+        db_pool = ThreadedConnectionPool(
+            minconn=1,
+            maxconn=5,
+            host=config.get("database", "host"),
+            port=config.getint("database", "port"),
+            dbname=config.get("database", "name"),
+            user=config.get("database", "user"),
+            password=config.get("database", "password")
+        )
+
+        db_pool_pid = current_pid
+
+    return db_pool
 
 def get_db():
-    return psycopg2.connect(
-        host=config.get("database", "host"),
-        port=config.get("database", "port"),
-        dbname=config.get("database", "name"),
-        user=config.get("database", "user"),
-        password=config.get("database", "password"),
-    )
+    if "db_conn" not in g:
+        g.db_conn = get_db_pool().getconn()
+
+    return g.db_conn
+    # return psycopg2.connect(
+    #     host=config.get("database", "host"),
+    #     port=config.get("database", "port"),
+    #     dbname=config.get("database", "name"),
+    #     user=config.get("database", "user"),
+    #     password=config.get("database", "password"),
+    # )
 
 
 @app.teardown_appcontext
 def return_db(error=None):
-    """Return the borrowed connection to the pool."""
+
     conn = g.pop("db_conn", None)
 
     if conn is None:
@@ -77,21 +102,20 @@ def return_db(error=None):
 
     try:
         if conn.closed:
-            db_pool.putconn(conn, close=True)
+            get_db_pool().putconn(conn, close=True)
             return
 
-        # Roll back any unfinished or failed transaction.
-        if conn.status != extensions.STATUS_READY:
-            conn.rollback()
-
-        db_pool.putconn(conn)
+        # Roll back unfinished transactions before reuse.
+        conn.rollback()
+        get_db_pool().putconn(conn)
 
     except Exception:
-        # Discard connections that cannot safely be reused.
+        app.logger.exception("Error returning database connection to pool")
+
         try:
-            db_pool.putconn(conn, close=True)
+            get_db_pool().putconn(conn, close=True)
         except Exception:
-            app.logger.exception("Failed to return DB connection to pool")
+            app.logger.exception("Failed to discard database connection")
 
 
 def sanitize(value, maxlen=20):
@@ -178,7 +202,7 @@ def apply():
         cur.execute("INSERT INTO otps (mobile, code, created_at) VALUES (%s, %s, %s)",
                     (mobile, code, datetime.now()))
         conn.commit()
-        cur.close(); conn.close()
+        cur.close(); 
         send_sms(mobile, "Your Sewa Setu OTP is %s. Valid for 5 minutes." % code)
         session.permanent = True
         session["apply_mobile"] = mobile
@@ -204,7 +228,7 @@ def verify():
         cur.execute("SELECT code, created_at FROM otps WHERE mobile = %s "
                     "ORDER BY id DESC LIMIT 1", (mobile,))
         row = cur.fetchone()
-        cur.close(); conn.close() 
+        cur.close();  
         if row and row[0] == code:
             age = (datetime.now() - row[1]).total_seconds()
             if age > OTP_VALIDITY_SECONDS:
@@ -326,7 +350,7 @@ def handle_submission():
 
     cur.execute("SELECT count(*) FROM applications WHERE mobile = %s", (mobile,))
     if cur.fetchone()[0] > 0:
-        cur.close(); conn.close()
+        cur.close(); 
         flash("An application already exists for this mobile number. "
               "Duplicate applications are not permitted.")
         return redirect(url_for("index"))
@@ -359,7 +383,7 @@ def handle_submission():
     with open(os.path.join(ack_dir, "%d.pdf" % new_id), "wb") as out:
         out.write(pdf_bytes)
 
-    cur.close(); conn.close()
+    cur.close(); 
     session.pop("form_data", None)
     session.pop("doc_path", None)
     session.pop("verified_mobile", None)
@@ -427,7 +451,7 @@ def status_login():
         cur = conn.cursor() 
         cur.execute("SELECT password_hash FROM portal_users WHERE mobile = %s", (mobile,))
         row = cur.fetchone()
-        cur.close(); conn.close() 
+        cur.close();  
         if row and row[0] == hash_password(password):
             session["logged_in"] = True
             session["portal_mobile"] = mobile
@@ -436,7 +460,7 @@ def status_login():
             cur.execute("SELECT id FROM applications WHERE mobile = %s "
                         "ORDER BY submitted_at DESC LIMIT 1", (mobile,))
             r = cur.fetchone()
-            cur.close(); conn.close()
+            cur.close(); 
             if r:
                 return redirect(url_for("view_application", app_id=r[0]))
             flash("No application found for this mobile number.")
@@ -456,7 +480,7 @@ def view_application(app_id):
                 "bank_account, ifsc, status, submitted_at, decided_at "
                 "FROM applications WHERE id = %s", (app_id,))
     row = cur.fetchone()
-    cur.close(); conn.close() 
+    cur.close();  
     if not row:
         abort(404)
     return render_template("application.html", a=row, app_id=app_id)
@@ -470,10 +494,10 @@ def ack_pdf(app_id):
         cur = conn.cursor() 
         cur.execute("SELECT id FROM applications WHERE id = %s", (app_id,))
         if not cur.fetchone():
-            cur.close(); conn.close() 
+            cur.close();  
             abort(404)
         data = generate_acknowledgment(cur, app_id)
-        cur.close(); conn.close() 
+        cur.close();  
         return send_file(io.BytesIO(data), mimetype="application/pdf")
     return send_file(path, mimetype="application/pdf")
 
@@ -497,7 +521,7 @@ def reset_password():
                 conn.commit()
                 send_sms(row[0], "Sewa Setu: your password has been reset to your "
                                  "date of birth (DDMMYYYY).")
-        cur.close(); conn.close()
+        cur.close(); 
         flash("If the mobile number exists, the password has been reset and sent by SMS.")
     return render_template("reset.html")
 
@@ -532,7 +556,7 @@ def admin_dashboard():
     cur.execute("SELECT block, count(*) FROM applications WHERE status = 'PENDING' "
                 "GROUP BY block ORDER BY count(*) DESC")
     by_block = cur.fetchall()
-    cur.close(); conn.close()
+    cur.close(); 
     return render_template("admin_dashboard.html", by_status=by_status,
                            overdue=overdue, by_block=by_block, sla=SLA_DAYS)
 
@@ -550,7 +574,7 @@ def admin_list():
                 "ORDER BY submitted_at ASC LIMIT 50 OFFSET %s",
                 (status, (page - 1) * 50))
     rows = cur.fetchall()
-    cur.close(); conn.close() 
+    cur.close();  
     return render_template("admin_list.html", rows=rows, status=status, page=page)
 
 
@@ -565,7 +589,7 @@ def admin_view(app_id):
                 "status, submitted_at, decided_at, decided_by "
                 "FROM applications WHERE id = %s", (app_id,))
     row = cur.fetchone()
-    cur.close(); conn.close()
+    cur.close(); 
     if not row:
         abort(404)
     return render_template("admin_view.html", a=row, app_id=app_id)
@@ -580,7 +604,7 @@ def admin_approve(app_id):
     cur.execute("UPDATE applications SET status = 'APPROVED', decided_at = %s "
                 "WHERE id = %s", (datetime.now(), app_id))
     conn.commit()
-    cur.close(); conn.close()
+    cur.close(); 
     flash("Application approved.")
     return redirect(url_for("admin_list"))
 
@@ -594,7 +618,7 @@ def admin_reject(app_id):
     cur.execute("UPDATE applications SET status = 'REJECTED', decided_at = %s "
                 "WHERE id = %s", (datetime.now(), app_id))
     conn.commit()
-    cur.close(); conn.close()
+    cur.close(); 
     flash("Application rejected.")
     return redirect(url_for("admin_list"))
 
