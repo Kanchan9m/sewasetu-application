@@ -471,14 +471,15 @@ def status_login():
 
 @app.route("/application/<int:app_id>")
 def view_application(app_id):
-    if not session.get("logged_in"):
+    if not session.get("logged_in") or not session.get("portal_mobile"):
         flash("Please login to view application status.")
         return redirect(url_for("status_login"))
+    mobile = session["portal_mobile"]
     conn = get_db()
     cur = conn.cursor() 
     cur.execute("SELECT application_no, applicant_name, mobile, dob, village, block, "
                 "bank_account, ifsc, status, submitted_at, decided_at "
-                "FROM applications WHERE id = %s", (app_id,))
+                "FROM applications WHERE id = %s AND mobile = %s" , (app_id,mobile))
     row = cur.fetchone()
     cur.close();  
     if not row:
@@ -488,17 +489,37 @@ def view_application(app_id):
 
 @app.route("/ack/<int:app_id>.pdf")
 def ack_pdf(app_id):
+    if not session.get("logged_in"):
+        flash("Please login to download your acknowledgment.")
+        return redirect(url_for("status_login"))
+    
+    mobile = session.get("portal_mobile")
+    if not mobile:
+        abort(403)
+
     path = os.path.join(UPLOAD_DIR, "ack", "%d.pdf" % app_id)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM applications WHERE id = %s AND mobile = %s",(app_id, mobile))
+
+    if not cur.fetchone():
+        cur.close()
+        abort(404)
+
+    cur.close()
+
     if not os.path.exists(path):
         conn = get_db()
-        cur = conn.cursor() 
+        cur = conn.cursor()
         cur.execute("SELECT id FROM applications WHERE id = %s", (app_id,))
         if not cur.fetchone():
-            cur.close();  
+            cur.close()
             abort(404)
+
         data = generate_acknowledgment(cur, app_id)
-        cur.close();  
+        cur.close()
         return send_file(io.BytesIO(data), mimetype="application/pdf")
+
     return send_file(path, mimetype="application/pdf")
 
 
@@ -597,7 +618,7 @@ def admin_view(app_id):
 
 @app.route("/admin/approve/<int:app_id>", methods=["POST"])
 def admin_approve(app_id):
-    if not session.get("logged_in"):
+    if not session.get("admin"):
         abort(403)
     conn = get_db()
     cur = conn.cursor()
@@ -611,7 +632,7 @@ def admin_approve(app_id):
 
 @app.route("/admin/reject/<int:app_id>", methods=["POST"])
 def admin_reject(app_id):
-    if not session.get("logged_in"):
+    if not session.get("admin"):
         abort(403)
     conn = get_db()
     cur = conn.cursor()
